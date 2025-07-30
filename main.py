@@ -15,11 +15,13 @@ from functools import lru_cache
 import hashlib
 from typing import List
 
+
 # HuggingFace sentence-transformers for local embeddings
 from sentence_transformers import SentenceTransformer
 
-# Load the embedding model once (MiniLM is fast and accurate for most RAG use)
-hf_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Load the embedding model once (MiniLM is fast and accurate for most RAG use), with HF token
+hf_token = os.getenv("HF_TOKEN")
+hf_model = SentenceTransformer('all-MiniLM-L6-v2', use_auth_token=hf_token)
 
 
 # --- Batch QA Function ---
