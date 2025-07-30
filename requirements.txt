@@ -8,3 +8,5 @@ numpy
 faiss-cpu
 google-genai
 python-multipart
+sentence-transformers
+pytest
