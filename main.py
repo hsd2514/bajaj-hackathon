@@ -21,11 +21,11 @@ from sentence_transformers import SentenceTransformer
 
 # Load the embedding model once (MiniLM is fast and accurate for most RAG use), with HF token
 hf_token = os.getenv("HF_TOKEN")
-hf_model = SentenceTransformer('all-MiniLM-L6-v2', use_auth_token=hf_token)
+hf_model = SentenceTransformer('all-mpnet-base-v2', use_auth_token=hf_token)
 
 
 # --- Batch QA Function ---
-def batch_answer_questions(questions: List[str], chunks, idx, top_k: int = 6, max_workers: int = 1):
+def batch_answer_questions(questions: List[str], chunks, idx, top_k: int = 10, max_workers: int = 1):
     try:
         # Use HuggingFace model for question embeddings
         q_embs = hf_model.encode(questions, show_progress_bar=False, convert_to_numpy=True)
@@ -33,7 +33,12 @@ def batch_answer_questions(questions: List[str], chunks, idx, top_k: int = 6, ma
         prompts = []
         for q_idx, question in enumerate(questions):
             context = "\n\n".join(chunks[i] for i in I[q_idx])
-            prompt = f"""You are analyzing the National Parivar Mediclaim Plus Policy document. Answer the question based on the provided context.\n\nPolicy Document Context:\n{context}\n\nQuestion: {question}\n\nInstructions:\n- Answer based ONLY on the context provided.\n- Be specific with numbers, timeframes, and conditions.\n- Limit your answer to one or two sentences.\n- Do not list exclusions, definitions, or repeat the question.\n- If the answer is in the context, state it directly.'\n\nAnswer:"""
+            prompt = (
+                "Answer the following question using only the provided context. "
+                "Be concise (1-2 sentences). If multiple details are present, summarize all. "
+                "If the answer is not in the context, say 'Information not available in provided context.'\n\n"
+                f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+            )
             prompts.append(prompt)
         # Use Gemini for answer generation
         answers = [None] * len(questions)
@@ -44,7 +49,7 @@ def batch_answer_questions(questions: List[str], chunks, idx, top_k: int = 6, ma
                     model="gemini-2.5-flash-lite",
                     contents=prompts[idx_]
                 )
-                _time.sleep(.66)  # Wait 0.66 seconds between requests to avoid rate limits
+                _time.sleep(1)  # Wait 1 second between requests to avoid rate limits
                 return resp.text.strip()
             except Exception as e:
                 return f"Error: {str(e)}"
