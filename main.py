@@ -1,9 +1,11 @@
-
-
-from google import genai
-from google.genai import types
+# --- RAG Pipeline Implementation ---
+import os
 import httpx
 import time
+import fitz
+import numpy as np
+import faiss
+from google import genai
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -21,47 +23,97 @@ QUESTIONS = [
     "Are there any sub‑limits on room rent and ICU charges for Plan A?"
 ]
 
-import os
-def answer_questions_with_gemini(pdf_url, questions):
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("Missing GEMINI_API_KEY environment variable. Please set GEMINI_API_KEY in your .env or environment.")
-    client = genai.Client(api_key=api_key)
-    doc_data = httpx.get(pdf_url).content
+def chunk_pdf(url, chunk_size=350, overlap=50):
+    resp = httpx.get(url, timeout=30)
+    resp.raise_for_status()
+    doc = fitz.open(stream=resp.content, filetype="pdf")
+    text = " ".join(page.get_text() for page in doc)
+    doc.close()
+    words = text.split()
+    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size-overlap)]
+    return chunks
+
+def embed_chunks(chunks, client):
+    # Gemini embedding API
+    resp = client.models.embed_content(
+        model="gemini-embedding-001",
+        contents=chunks,
+        config={"task_type": "RETRIEVAL_DOCUMENT", "output_dimensionality": 3072}
+    )
+    arr = np.array([ce.values for ce in resp.embeddings], dtype="float32")
+    return arr
+
+def build_faiss_index(embs):
+    d = embs.shape[1]
+    nlist = max(10, len(embs)//10)
+    quant = faiss.IndexFlatL2(d)
+    idx = faiss.IndexIVFFlat(quant, d, nlist, faiss.METRIC_L2)
+    idx.train(embs)
+    idx.nprobe = max(1, nlist//10)
+    idx.add(embs)
+    return idx
+
+def embed_query(questions, client):
+    resp = client.models.embed_content(
+        model="gemini-embedding-001",
+        contents=questions,
+        config={"task_type": "RETRIEVAL_QUERY", "output_dimensionality": 3072}
+    )
+    arr = np.array([ce.values for ce in resp.embeddings], dtype="float32")
+    return arr
+
+def answer_with_context(question, context, client):
     system_prompt = (
-        "You are an expert insurance policy Q&A assistant. Given a question and a policy document (as PDF), your job is to answer the question as accurately, concisely, and as short and crisp as possible, using only information from the document.\n"
-        "- Be short and crisp.\n"
+        "You are an expert insurance policy Q&A assistant. Given a question and a context from a policy document, answer as accurately, concisely, and as short and crisp as possible, using only the provided context.\n"
+        "- Be short and crisp but informative also dont keep it two few words u can improve it.\n"
         "- If the answer is a fact, state it clearly and directly.\n"
         "- If the answer requires conditions, eligibility, or limits, summarize the key points.\n"
         "- Do not quote, cite, or mention the source, section, page, or clause.\n"
-        "- If the answer is not found in the document, reply: 'Information not available in the provided document.'\n"
-        "- Do not invent or assume information not present in the document.\n"
+        "- Do not invent or assume information not present in the context.\n"
         "- Use clear, professional language suitable for insurance customers.\n"
-        "- For multi-part or complex answers, use bullet points or short paragraphs for clarity.\n"
         "- Do not repeat the question in your answer.\n"
         "Return only the answer as a string."
     )
-    answers = []
-    for i, q in enumerate(questions, 1):
-        response = client.models.generate_content(
+    prompt = f"{system_prompt}\nContext:\n{context}\n\nQuestion: {question}\nAnswer:"
+    try:
+        resp = client.models.generate_content(
             model="gemini-2.5-flash-lite",
-            contents=[
-                types.Part.from_bytes(
-                    data=doc_data,
-                    mime_type='application/pdf',
-                ),
-                system_prompt + "\nQuestion: " + q
-            ]
+            contents=prompt
         )
-        print(f"{i}. {response.text.strip()}")
-        answers.append(response.text.strip())
-        time.sleep(0.2)
+        return resp.text.strip()
+    except Exception as e:
+        print(f"[RAG] Error in answer_with_context: {e}")
+        return f"[Error: {e}]"
+
+def rag_answer_questions(pdf_url, questions, top_k=4, api_key=None):
+    if api_key is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("Missing GEMINI_API_KEY environment variable. Please set GEMINI_API_KEY in your .env or environment.")
+    client = genai.Client(api_key=api_key)
+    print("[RAG] Chunking PDF...")
+    chunks = chunk_pdf(pdf_url)
+    print(f"[RAG] {len(chunks)} chunks created.")
+    print("[RAG] Embedding chunks...")
+    embs = embed_chunks(chunks, client)
+    print("[RAG] Building FAISS index...")
+    idx = build_faiss_index(embs)
+    print("[RAG] Embedding questions...")
+    q_embs = embed_query(questions, client)
+    D, I = idx.search(q_embs, top_k)
+    print(f"[RAG] Retrieved top-{top_k} chunks per question.")
+    answers = []
+    for i, q in enumerate(questions):
+        context = "\n\n".join(chunks[j] for j in I[i])
+        ans = answer_with_context(q, context, client)
+        print(f"A{i+1}: {ans}\n")
+        answers.append(ans)
     return answers
 
 def main():
-    print("=== Gemini PDF Q&A ===")
+    print("=== RAG PDF Q&A ===")
     t0 = time.time()
-    answers = answer_questions_with_gemini(PDF_URL, QUESTIONS)
+    answers = rag_answer_questions(PDF_URL, QUESTIONS)
     print(f"[+] Total runtime: {time.time()-t0:.1f}s")
 
 if __name__ == "__main__":

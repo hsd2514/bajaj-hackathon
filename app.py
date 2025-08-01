@@ -39,10 +39,10 @@ async def hackrx_run(req: RunRequest, authorization: Optional[str] = Header(None
     #     raise HTTPException(status_code=500, detail=str(e))
 
     # return {"answers": answers}
-    # --- Gemini PDF Q&A Execution ---
+    # --- RAG PDF Q&A Execution ---
     try:
         answers = await asyncio.to_thread(
-            main.answer_questions_with_gemini, req.documents, req.questions
+            main.rag_answer_questions, req.documents, req.questions
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -10,3 +10,4 @@ google-genai
 python-multipart
 sentence-transformers
 pytest
+google-cloud-aiplatform
