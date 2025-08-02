@@ -29,8 +29,22 @@ def chunk_pdf(url, chunk_size=350, overlap=50):
     doc = fitz.open(stream=resp.content, filetype="pdf")
     text = " ".join(page.get_text() for page in doc)
     doc.close()
-    words = text.split()
-    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size-overlap)]
+    # Improved chunking: split by sentences, then group sentences
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    chunk = []
+    total_len = 0
+    for sent in sentences:
+        chunk.append(sent)
+        total_len += len(sent.split())
+        if total_len >= chunk_size:
+            chunks.append(" ".join(chunk))
+            # Overlap: keep last few sentences
+            chunk = chunk[-max(1, overlap//20):]
+            total_len = sum(len(s.split()) for s in chunk)
+    if chunk:
+        chunks.append(" ".join(chunk))
     return chunks
 
 def embed_chunks(chunks, client):
@@ -65,9 +79,9 @@ def embed_query(questions, client):
 def answer_with_context(question, context, client):
     system_prompt = (
         "You are an expert insurance policy Q&A assistant. Given a question and a context from a policy document, answer as accurately, concisely, and as short and crisp as possible, using only the provided context.\n"
-        "- Be short and crisp but informative also dont keep it two few words u can improve it.\n"
+        "- Use only the provided context.\n"
         "- If the answer is a fact, state it clearly and directly.\n"
-        "- If the answer requires conditions, eligibility, or limits, summarize the key points.\n"
+        "- If the answer requires conditions, eligibility, or limits, summarize the key points precisely.\n"
         "- Do not quote, cite, or mention the source, section, page, or clause.\n"
         "- Do not invent or assume information not present in the context.\n"
         "- Use clear, professional language suitable for insurance customers.\n"
@@ -100,11 +114,19 @@ def rag_answer_questions(pdf_url, questions, top_k=4, api_key=None):
     idx = build_faiss_index(embs)
     print("[RAG] Embedding questions...")
     q_embs = embed_query(questions, client)
+    top_k = 6
     D, I = idx.search(q_embs, top_k)
     print(f"[RAG] Retrieved top-{top_k} chunks per question.")
     answers = []
     for i, q in enumerate(questions):
-        context = "\n\n".join(chunks[j] for j in I[i])
+        # Optionally filter out duplicate chunks
+        unique_idxs = []
+        seen = set()
+        for j in I[i]:
+            if j not in seen:
+                unique_idxs.append(j)
+                seen.add(j)
+        context = "\n\n".join(chunks[j] for j in unique_idxs)
         ans = answer_with_context(q, context, client)
         print(f"A{i+1}: {ans}\n")
         answers.append(ans)
