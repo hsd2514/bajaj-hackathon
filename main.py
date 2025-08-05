@@ -3,10 +3,13 @@ import os
 import httpx
 import time
 import fitz
+import zipfile
+import docx
 import numpy as np
 import faiss
 from google import genai
 from dotenv import load_dotenv
+import io
 load_dotenv()
 
 PDF_URL = "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"
@@ -23,14 +26,73 @@ QUESTIONS = [
     "Are there any sub‑limits on room rent and ICU charges for Plan A?"
 ]
 
-def chunk_pdf(url, chunk_size=350, overlap=50):
-    resp = httpx.get(url, timeout=30)
-    resp.raise_for_status()
-    doc = fitz.open(stream=resp.content, filetype="pdf")
-    text = " ".join(page.get_text() for page in doc)
-    doc.close()
-    # Improved chunking: split by sentences, then group sentences
+def chunk_pdf(url_or_bytes, chunk_size=350, overlap=50):
     import re
+    def extract_text_from_pdf(pdf_bytes):
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text = " ".join(page.get_text() for page in doc)
+        doc.close()
+        return text
+
+    def extract_text_from_docx(docx_bytes):
+        with open("_temp.docx", "wb") as f:
+            f.write(docx_bytes)
+        doc = docx.Document("_temp.docx")
+        text = " ".join([p.text for p in doc.paragraphs])
+        os.remove("_temp.docx")
+        return text
+
+    def extract_text_from_txt(txt_bytes):
+        return txt_bytes.decode(errors="ignore")
+
+    def extract_text_from_binary(bin_bytes, ext_hint=None):
+        # Fallback: try to decode as text
+        try:
+            return bin_bytes.decode(errors="ignore")
+        except Exception:
+            return ""
+
+    # Handle URL or bytes (PDF, ZIP, DOCX, TXT, etc.)
+    if isinstance(url_or_bytes, str):
+        resp = httpx.get(url_or_bytes, timeout=30)
+        resp.raise_for_status()
+        data = resp.content
+        ext = url_or_bytes.split("?")[0].split(".")[-1].lower()
+    else:
+        data = url_or_bytes
+        ext = None
+
+    text = ""
+    if ext == "zip" or (ext is None and zipfile.is_zipfile(io.BytesIO(data))):
+        all_texts = []
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for fname in z.namelist():
+                fext = fname.split(".")[-1].lower()
+                fbytes = z.read(fname)
+                if fext == "pdf":
+                    all_texts.append(extract_text_from_pdf(fbytes))
+                elif fext == "docx":
+                    all_texts.append(extract_text_from_docx(fbytes))
+                elif fext == "txt":
+                    all_texts.append(extract_text_from_txt(fbytes))
+        text = " ".join(all_texts)
+    elif ext == "pdf" or (ext is None and fitz.open(stream=data, filetype="pdf")):
+        text = extract_text_from_pdf(data)
+    elif ext == "docx":
+        text = extract_text_from_docx(data)
+    elif ext == "txt":
+        text = extract_text_from_txt(data)
+    else:
+        # Try PDF first, fallback to TXT, then binary extraction
+        try:
+            text = extract_text_from_pdf(data)
+        except Exception:
+            try:
+                text = extract_text_from_txt(data)
+            except Exception:
+                text = extract_text_from_binary(data, ext)
+
+    # Improved chunking: split by sentences, then group sentences
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     chunk = []
@@ -114,7 +176,7 @@ def rag_answer_questions(pdf_url, questions, top_k=4, api_key=None):
     idx = build_faiss_index(embs)
     print("[RAG] Embedding questions...")
     q_embs = embed_query(questions, client)
-    top_k = 6
+    top_k = 8
     D, I = idx.search(q_embs, top_k)
     print(f"[RAG] Retrieved top-{top_k} chunks per question.")
     answers = []
@@ -126,7 +188,28 @@ def rag_answer_questions(pdf_url, questions, top_k=4, api_key=None):
             if j not in seen:
                 unique_idxs.append(j)
                 seen.add(j)
-        context = "\n\n".join(chunks[j] for j in unique_idxs)
+        candidate_chunks = [chunks[j] for j in unique_idxs]
+        # Semantic re-ranking: use Gemini to score each chunk for relevance
+        scored_chunks = []
+        for chunk in candidate_chunks:
+            score_prompt = (
+                f"Given the following insurance policy context and question, rate the relevance of the context to answering the question on a scale of 1 (not relevant) to 5 (highly relevant).\n"
+                f"Context: {chunk}\nQuestion: {q}\nRelevance score:"
+            )
+            try:
+                score_resp = client.models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=score_prompt
+                )
+                score_text = score_resp.text.strip()
+                score = int(next((s for s in score_text if s.isdigit()), '1'))
+            except Exception:
+                score = 1
+            scored_chunks.append((score, chunk))
+        # Select top 4 chunks by score
+        scored_chunks.sort(reverse=True, key=lambda x: x[0])
+        top_chunks = [chunk for score, chunk in scored_chunks[:4]]
+        context = "\n\n".join(top_chunks)
         ans = answer_with_context(q, context, client)
         print(f"A{i+1}: {ans}\n")
         answers.append(ans)

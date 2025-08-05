@@ -2,12 +2,11 @@ python-dotenv
 fastapi
 uvicorn
 pydantic
-requests
+httpx
 PyMuPDF
 numpy
 faiss-cpu
 google-genai
 python-multipart
-sentence-transformers
+python-docx
 pytest
-google-cloud-aiplatform
