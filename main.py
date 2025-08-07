@@ -92,21 +92,31 @@ def chunk_pdf(url_or_bytes, chunk_size=350, overlap=50):
             except Exception:
                 text = extract_text_from_binary(data, ext)
 
-    # Improved chunking: split by sentences, then group sentences
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    # Improved chunking: split by paragraphs, clean and deduplicate
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    # Remove duplicates and very short chunks
+    seen = set()
+    clean_paragraphs = []
+    for p in paragraphs:
+        pnorm = p.lower().strip()
+        if len(pnorm) < 30 or pnorm in seen:
+            continue
+        seen.add(pnorm)
+        clean_paragraphs.append(p)
+    # Group paragraphs into chunks of ~chunk_size words
     chunks = []
     chunk = []
     total_len = 0
-    for sent in sentences:
-        chunk.append(sent)
-        total_len += len(sent.split())
+    for para in clean_paragraphs:
+        chunk.append(para)
+        total_len += len(para.split())
         if total_len >= chunk_size:
-            chunks.append(" ".join(chunk))
-            # Overlap: keep last few sentences
-            chunk = chunk[-max(1, overlap//20):]
+            chunks.append("\n\n".join(chunk))
+            # Overlap: keep last paragraph
+            chunk = chunk[-1:]
             total_len = sum(len(s.split()) for s in chunk)
     if chunk:
-        chunks.append(" ".join(chunk))
+        chunks.append("\n\n".join(chunk))
     return chunks
 
 def embed_chunks(chunks, client):
@@ -144,6 +154,8 @@ def answer_with_context(question, context, client):
         "- Use only the provided context.\n"
         "- If the answer is a fact, state it clearly and directly.\n"
         "- If the answer requires conditions, eligibility, or limits, summarize the key points precisely.\n"
+        "- If the answer is not found or is incomplete, say 'Not found in provided context.'\n"
+        "- List all relevant facts, exclusions, and limits.\n"
         "- Do not quote, cite, or mention the source, section, page, or clause.\n"
         "- Do not invent or assume information not present in the context.\n"
         "- Use clear, professional language suitable for insurance customers.\n"
@@ -176,12 +188,11 @@ def rag_answer_questions(pdf_url, questions, top_k=4, api_key=None):
     idx = build_faiss_index(embs)
     print("[RAG] Embedding questions...")
     q_embs = embed_query(questions, client)
-    top_k = 8
+    top_k = 12
     D, I = idx.search(q_embs, top_k)
     print(f"[RAG] Retrieved top-{top_k} chunks per question.")
     answers = []
     for i, q in enumerate(questions):
-        # Optionally filter out duplicate chunks
         unique_idxs = []
         seen = set()
         for j in I[i]:
@@ -206,9 +217,16 @@ def rag_answer_questions(pdf_url, questions, top_k=4, api_key=None):
             except Exception:
                 score = 1
             scored_chunks.append((score, chunk))
-        # Select top 4 chunks by score
+        # Select top N chunks by score, up to ~3500 words (to fit Gemini context)
         scored_chunks.sort(reverse=True, key=lambda x: x[0])
-        top_chunks = [chunk for score, chunk in scored_chunks[:4]]
+        top_chunks = []
+        total_words = 0
+        for score, chunk in scored_chunks:
+            nwords = len(chunk.split())
+            if total_words + nwords > 3500:
+                break
+            top_chunks.append(chunk)
+            total_words += nwords
         context = "\n\n".join(top_chunks)
         ans = answer_with_context(q, context, client)
         print(f"A{i+1}: {ans}\n")
