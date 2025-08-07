@@ -154,7 +154,6 @@ def answer_with_context(question, context, client):
         "- Use only the provided context.\n"
         "- If the answer is a fact, state it clearly and directly.\n"
         "- If the answer requires conditions, eligibility, or limits, summarize the key points precisely.\n"
-        "- If the answer is not found or is incomplete, say 'Not found in provided context.'\n"
         "- List all relevant facts, exclusions, and limits.\n"
         "- Do not quote, cite, or mention the source, section, page, or clause.\n"
         "- Do not invent or assume information not present in the context.\n"
